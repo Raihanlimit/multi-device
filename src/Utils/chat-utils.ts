@@ -1,13 +1,11 @@
 import { Boom } from '@hapi/boom'
 import { aesDecrypt, hmacSign, aesEncrypt, hkdf } from "./crypto"
-import { WAPatchCreate, ChatMutation, WAPatchName, LTHashState, ChatModification, LastMessageList } from "../Types"
+import { AuthenticationState, WAPatchCreate, ChatMutation, WAPatchName, LTHashState, ChatModification, SignalKeyStore } from "../Types"
 import { proto } from '../../WAProto'
 import { LT_HASH_ANTI_TAMPERING } from './lt-hash'
 import { BinaryNode, getBinaryNodeChild, getBinaryNodeChildren } from '../WABinary'
 import { toNumber } from './generics'
 import { downloadContentFromMessage,  } from './messages-media'
-
-type FetchAppStateSyncKey = (keyId: string) => Promise<proto.IAppStateSyncKeyData> | proto.IAppStateSyncKeyData
 
 const mutationKeys = (keydata: Uint8Array) => {
     const expanded = hkdf(keydata, 160, { info: 'WhatsApp Mutation Keys' })
@@ -114,9 +112,9 @@ export const encodeSyncdPatch = async(
     { type, index, syncAction, apiVersion, operation }: WAPatchCreate,
     myAppStateKeyId: string,
     state: LTHashState,
-    getAppStateSyncKey: FetchAppStateSyncKey
+    keys: SignalKeyStore
 ) => {
-    const key = !!myAppStateKeyId ? await getAppStateSyncKey(myAppStateKeyId) : undefined
+    const key = !!myAppStateKeyId ? await keys.getAppStateSyncKey(myAppStateKeyId) : undefined
     if(!key) {
         throw new Boom(`myAppStateKey ("${myAppStateKeyId}") not present`, { statusCode: 404 })
     }
@@ -177,7 +175,7 @@ export const encodeSyncdPatch = async(
 export const decodeSyncdMutations = async(
     msgMutations: (proto.ISyncdMutation | proto.ISyncdRecord)[], 
     initialState: LTHashState,
-    getAppStateSyncKey: FetchAppStateSyncKey,
+    getAppStateSyncKey: SignalKeyStore['getAppStateSyncKey'],
     validateMacs: boolean
 ) => {
     const keyCache: { [_: string]: ReturnType<typeof mutationKeys> } = { }
@@ -249,7 +247,7 @@ export const decodeSyncdPatch = async(
     msg: proto.ISyncdPatch, 
     name: WAPatchName,
     initialState: LTHashState,
-    getAppStateSyncKey: FetchAppStateSyncKey,
+    getAppStateSyncKey: SignalKeyStore['getAppStateSyncKey'],
     validateMacs: boolean
 ) => {
     if(validateMacs) {
@@ -272,7 +270,7 @@ export const extractSyncdPatches = async(result: BinaryNode) => {
     const syncNode = getBinaryNodeChild(result, 'sync')
     const collectionNodes = getBinaryNodeChildren(syncNode, 'collection')
     
-    const final = { } as { [T in WAPatchName]: { patches: proto.ISyncdPatch[], hasMorePatches: boolean, snapshot?: proto.ISyncdSnapshot } }
+    const final = { } as { [T in WAPatchName]: { patches: proto.ISyncdPatch[], snapshot?: proto.ISyncdSnapshot } }
     await Promise.all(
         collectionNodes.map(
             async collectionNode => {
@@ -283,8 +281,6 @@ export const extractSyncdPatches = async(result: BinaryNode) => {
 
                 const syncds: proto.ISyncdPatch[] = []
                 const name = collectionNode.attrs.name as WAPatchName
-
-                const hasMorePatches = collectionNode.attrs.has_more_patches == 'true'
         
                 let snapshot: proto.ISyncdSnapshot | undefined = undefined
                 if(snapshotNode && !!snapshotNode.content) {
@@ -311,7 +307,7 @@ export const extractSyncdPatches = async(result: BinaryNode) => {
                     }
                 }
         
-                final[name] = { patches: syncds, hasMorePatches, snapshot }
+                final[name] = { patches: syncds, snapshot }
             }
         )
     )
@@ -338,7 +334,7 @@ export const downloadExternalPatch = async(blob: proto.IExternalBlobReference) =
 export const decodeSyncdSnapshot = async(
     name: WAPatchName,
     snapshot: proto.ISyncdSnapshot,
-    getAppStateSyncKey: FetchAppStateSyncKey,
+    getAppStateSyncKey: SignalKeyStore['getAppStateSyncKey'],
     validateMacs: boolean = true
 ) => {
     const newState = newLTHashState()
@@ -374,7 +370,7 @@ export const decodePatches = async(
     name: WAPatchName,
     syncds: proto.ISyncdPatch[],
     initial: LTHashState,
-    getAppStateSyncKey: FetchAppStateSyncKey,
+    getAppStateSyncKey: SignalKeyStore['getAppStateSyncKey'],
     validateMacs: boolean = true
 ) => {
     const successfulMutations: ChatMutation[] = []
@@ -420,10 +416,11 @@ export const decodePatches = async(
 
 export const chatModificationToAppPatch = (
     mod: ChatModification,
-    jid: string
+    jid: string,
+    lastMessages: Pick<proto.IWebMessageInfo, 'key' | 'messageTimestamp'>[]
 ) => {
     const OP = proto.SyncdMutation.SyncdMutationSyncdOperation
-    const getMessageRange = (lastMessages: LastMessageList) => {
+    const getMessageRange = () => {
         if(!lastMessages?.length) {
             throw new Boom('Expected last message to be not from me', { statusCode: 400 })
         }
@@ -456,7 +453,7 @@ export const chatModificationToAppPatch = (
             syncAction: {
                 archiveChatAction: {
                     archived: !!mod.archive,
-                    messageRange: getMessageRange(mod.lastMessages)
+                    messageRange: getMessageRange()
                 }
             },
             index: ['archive', jid],
@@ -469,7 +466,7 @@ export const chatModificationToAppPatch = (
             syncAction: {
                 markChatAsReadAction: {
                     read: mod.markRead,
-                    messageRange: getMessageRange(mod.lastMessages)
+                    messageRange: getMessageRange()
                 }
             },
             index: ['markChatAsRead', jid],
@@ -481,7 +478,7 @@ export const chatModificationToAppPatch = (
         if(mod.clear === 'all') {
             throw new Boom('not supported')
         } else {
-            const key = mod.clear.messages[0]
+            const key = mod.clear.message
             patch = {
                 syncAction: {
                     deleteMessageForMeAction: {

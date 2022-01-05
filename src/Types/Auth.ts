@@ -1,5 +1,6 @@
 import type { Contact } from "./Contact"
 import type { proto } from "../../WAProto"
+import type { WAPatchName } from "./Chat"
 
 export type KeyPair = { public: Uint8Array, private: Uint8Array }
 export type SignedKeyPair = { keyPair: KeyPair, signature: Uint8Array, keyId: number }
@@ -42,28 +43,22 @@ export type AuthenticationCreds = SignalCreds & {
     lastAccountSyncTimestamp?: number
 }
 
-export type SignalDataTypeMap = {
-    'pre-key': KeyPair
-    'session': any
-    'sender-key': any
-    'sender-key-memory': { [jid: string]: boolean }
-    'app-state-sync-key': proto.IAppStateSyncKeyData
-    'app-state-sync-version': LTHashState
-}
-
-export type SignalDataSet = { [T in keyof SignalDataTypeMap]?: { [id: string]: SignalDataTypeMap[T] | null } }
-
 type Awaitable<T> = T | Promise<T>
-
 export type SignalKeyStore = {
-    get<T extends keyof SignalDataTypeMap>(type: T, ids: string[]): Awaitable<{ [id: string]: SignalDataTypeMap[T] }>
-    set(data: SignalDataSet): Awaitable<void>
-}
+    getPreKey: (keyId: number) => Awaitable<KeyPair>
+    setPreKey: (keyId: number, pair: KeyPair | null) => Awaitable<void>
 
-export type SignalKeyStoreWithTransaction = SignalKeyStore & {
-    isInTransaction: () => boolean
-    transaction(exec: () => Promise<void>): Promise<void>
-    prefetch<T extends keyof SignalDataTypeMap>(type: T, ids: string[]): Promise<void>
+    getSession: (sessionId: string) => Awaitable<any>
+    setSession: (sessionId: string, item: any | null) => Awaitable<void>
+
+    getSenderKey: (id: string) => Awaitable<any>
+    setSenderKey: (id: string, item: any | null) => Awaitable<void>
+
+    getAppStateSyncKey: (id: string) => Awaitable<proto.IAppStateSyncKeyData>
+    setAppStateSyncKey: (id: string, item: proto.IAppStateSyncKeyData | null) => Awaitable<void>
+
+    getAppStateSyncVersion: (name: WAPatchName) => Awaitable<LTHashState>
+    setAppStateSyncVersion: (id: WAPatchName, item: LTHashState) => Awaitable<void>
 }
 
 export type SignalAuthState = {

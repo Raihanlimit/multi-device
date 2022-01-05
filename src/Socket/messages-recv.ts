@@ -1,19 +1,22 @@
 
-import { SocketConfig, WAMessageStubType, ParticipantAction, Chat, GroupMetadata, WAMessageKey, Contact } from "../Types"
+import { SocketConfig, WAMessageStubType, ParticipantAction, Chat, GroupMetadata, WAMessageKey } from "../Types"
 import { decodeMessageStanza, encodeBigEndian, toNumber, downloadHistory, generateSignalPubKey, xmppPreKey, xmppSignedPreKey } from "../Utils"
-import { BinaryNode, jidDecode, jidEncode, isJidStatusBroadcast, areJidsSameUser, getBinaryNodeChildren, jidNormalizedUser, getAllBinaryNodeChildren, BinaryNodeAttributes, isJidGroup } from '../WABinary'
+import { BinaryNode, jidDecode, jidEncode, isJidStatusBroadcast, areJidsSameUser, getBinaryNodeChildren, jidNormalizedUser, getAllBinaryNodeChildren, BinaryNodeAttributes } from '../WABinary'
 import { proto } from "../../WAProto"
 import { KEY_BUNDLE_TYPE } from "../Defaults"
 import { makeChatsSocket } from "./chats"
 import { extractGroupMetadata } from "./groups"
+import { Boom } from "@hapi/boom"
 
-const STATUS_MAP: { [_: string]: proto.WebMessageInfo.WebMessageInfoStatus } = {
-    'played': proto.WebMessageInfo.WebMessageInfoStatus.PLAYED,
-    'read': proto.WebMessageInfo.WebMessageInfoStatus.READ,
-    'read-self': proto.WebMessageInfo.WebMessageInfoStatus.READ
+const getStatusFromReceiptType = (type: string | undefined) => {
+    if(type === 'read' || type === 'read-self') {
+        return proto.WebMessageInfo.WebMessageInfoStatus.READ
+    }
+    if(typeof type === 'undefined') {
+        return proto.WebMessageInfo.WebMessageInfoStatus.DELIVERY_ACK
+    }
+    return undefined
 }
-
-const getStatusFromReceiptType = (type: string | undefined) => STATUS_MAP[type]
 
 export const makeMessagesRecvSocket = (config: SocketConfig) => {
 	const { logger } = config
@@ -22,7 +25,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		ev,
         authState,
 		ws,
-        assertSessions,
+        assertSession,
         assertingPreKeys,
 		sendNode,
         relayMessage,
@@ -143,12 +146,12 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
                     if(keys?.length) {
                         let newAppStateSyncKeyId = ''
                         for(const { keyData, keyId } of keys) {
-                            const strKeyId = Buffer.from(keyId.keyId!).toString('base64')
+                            const str = Buffer.from(keyId.keyId!).toString('base64')
                             
-                            logger.info({ strKeyId }, 'injecting new app state sync key')
-                            await authState.keys.set({ 'app-state-sync-key': { [strKeyId]: keyData } })
+                            logger.info({ str }, 'injecting new app state sync key')
+                            await authState.keys.setAppStateSyncKey(str, keyData)
     
-                            newAppStateSyncKeyId = strKeyId
+                            newAppStateSyncKeyId = str
                         }
                         
                         ev.emit('creds.update', { myAppStateKeyId: newAppStateSyncKeyId })
@@ -220,18 +223,11 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 
     const processHistoryMessage = (item: proto.HistorySync) => {
         const messages: proto.IWebMessageInfo[] = []
-        const contacts: Contact[] = []
         switch(item.syncType) {
             case proto.HistorySync.HistorySyncHistorySyncType.INITIAL_BOOTSTRAP:
                 const chats = item.conversations!.map(
                     c => {
                         const chat: Chat = { ...c }
-                        if(chat.name) {
-                            contacts.push({
-                                id: chat.id,
-                                name: chat.name
-                            })
-                        }
                         //@ts-expect-error
                         delete chat.messages
                         for(const msg of c.messages || []) {
@@ -242,7 +238,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
                         return chat
                     }
                 )
-                ev.emit('chats.set', { chats, messages, contacts })
+                ev.emit('chats.set', { chats, messages })
             break
             case proto.HistorySync.HistorySyncHistorySyncType.RECENT:
                 // push remaining messages
@@ -256,12 +252,10 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
                 }
             break
             case proto.HistorySync.HistorySyncHistorySyncType.PUSH_NAME:
-                contacts.push(
-                    ...item.pushnames.map(
-                        p => ({ notify: p.pushname, id: p.id })
-                    )
+                const contacts = item.pushnames.map(
+                    p => ({ notify: p.pushname, id: p.id })
                 )
-                ev.emit('chats.set', { chats: [], messages: [], contacts })
+                ev.emit('contacts.upsert', contacts)
             break
             case proto.HistorySync.HistorySyncHistorySyncType.INITIAL_STATUS_V3:
                 // TODO
@@ -471,21 +465,16 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
     })
 
     const sendMessagesAgain = async(key: proto.IMessageKey, ids: string[]) => {
-        
+        const participant = key.participant || key.remoteJid
+        await assertSession(participant, true)
+
+        logger.debug({ key, ids }, 'recv retry request, forced new session')
+
         const msgs = await Promise.all(
             ids.map(id => (
                 config.getMessage({ ...key, id })
             ))
         )
-
-        const participant = key.participant || key.remoteJid
-        await assertSessions([participant], true)
-
-        if(isJidGroup(key.remoteJid)) {
-            await authState.keys.set({ 'sender-key-memory': { [key.remoteJid]: null } })
-        }
-
-        logger.debug({ participant }, 'forced new session for retry recp')
 
         for(let i = 0; i < msgs.length;i++) {
             if(msgs[i]) {
@@ -500,12 +489,9 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
     }
 
     const handleReceipt = async(node: BinaryNode) => {
-        let shouldAck = true
-
         const { attrs, content } = node
-        const isNodeFromMe = areJidsSameUser(attrs.from, authState.creds.me?.id)
         const remoteJid = attrs.recipient || attrs.from 
-        const fromMe = isNodeFromMe || (attrs.recipient ? false : true)
+        const fromMe = attrs.recipient ? false : true
 
         const ids = [attrs.id]
         if(Array.isArray(content)) {
@@ -521,7 +507,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
         }
 
         const status = getStatusFromReceiptType(attrs.type)
-        if(typeof status !== 'undefined' && !isNodeFromMe) {
+        if(typeof status !== 'undefined' && !areJidsSameUser(attrs.from, authState.creds.me?.id)) {
             ev.emit('messages.update', ids.map(id => ({
                 key: { ...key, id },
                 update: { status }
@@ -529,25 +515,10 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
         }
 
         if(attrs.type === 'retry') {
-            // correctly set who is asking for the retry
-            key.participant = key.participant || attrs.from
-            if(key.fromMe) {
-                try {
-                    logger.debug({ attrs }, 'recv retry request')
-                    await sendMessagesAgain(key, ids)
-                } catch(error) {
-                    logger.error({ key, ids, trace: error.stack }, 'error in sending message again')
-                    shouldAck = false
-                }
-            } else {
-                logger.info({ attrs, key }, 'recv retry for not fromMe message')
-            }
+            await sendMessagesAgain(key, ids)
         }
 
-        if(shouldAck) {
-            await sendMessageAck(node, { class: 'receipt', type: attrs.type })
-        }
-        
+        await sendMessageAck(node, { class: 'receipt', type: attrs.type })
     }
 
     ws.on('CB:receipt', handleReceipt)

@@ -1,5 +1,3 @@
-import { Contact } from "./Contact"
-
 export type WAConnectionState = 'open' | 'connecting' | 'close'
 
 export type ConnectionState = {
@@ -15,11 +13,5 @@ export type ConnectionState = {
 	/** the current QR code */
 	qr?: string
 	/** has the device received all pending notifications while it was offline */
-	receivedPendingNotifications?: boolean
-	/** legacy connection options */
-	legacy?: {
-		phoneConnected: boolean
-		user?: Contact
-	}
-	
+	receivedPendingNotifications?: boolean 
 }

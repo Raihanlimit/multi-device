@@ -3,7 +3,7 @@ import { encodeBigEndian } from "./generics"
 import { Curve } from "./crypto"
 import { SenderKeyDistributionMessage, GroupSessionBuilder, SenderKeyRecord, SenderKeyName, GroupCipher } from '../../WASignalGroup'
 import { SignalIdentity, SignalKeyStore, SignedKeyPair, KeyPair, SignalAuthState, AuthenticationCreds } from "../Types/Auth"
-import { assertNodeErrorFree, BinaryNode, getBinaryNodeChild, getBinaryNodeChildBuffer, getBinaryNodeChildUInt, jidDecode, JidWithDevice, getBinaryNodeChildren } from "../WABinary"
+import { assertNodeErrorFree, BinaryNode, getBinaryNodeChild, getBinaryNodeChildBuffer, getBinaryNodeChildUInt, jidDecode, JidWithDevice } from "../WABinary"
 import { proto } from "../../WAProto"
 
 export const generateSignalPubKey = (pubKey: Uint8Array | Buffer) => {
@@ -33,12 +33,13 @@ export const createSignalIdentity = (
 	}
 }
 
-export const getPreKeys = async({ get }: SignalKeyStore, min: number, limit: number) => {
-	const idList: string[] = []
+export const getPreKeys = async({ getPreKey }: SignalKeyStore, min: number, limit: number) => {
+	const dict: { [id: number]: KeyPair } = { }
 	for(let id = min; id < limit;id++) {
-		idList.push(id.toString())
+		const key = await getPreKey(id)
+		if(key) dict[+id] = key
 	}
-	return get('pre-key', idList)
+	return dict
 }
 
 export const generateOrGetPreKeys = (creds: AuthenticationCreds, range: number) => {
@@ -83,21 +84,20 @@ export const xmppPreKey = (pair: KeyPair, id: number): BinaryNode => (
 )
 
 export const signalStorage = ({ creds, keys }: SignalAuthState) => ({
-	loadSession: async (id: string) => {
-		const { [id]: sess } = await keys.get('session', [id])
+	loadSession: async id => {
+		const sess = await keys.getSession(id)
 		if(sess) {
 			return libsignal.SessionRecord.deserialize(sess)
 		}
 	},
 	storeSession: async(id, session) => {
-		await keys.set({ 'session': { [id]: session.serialize() } })
+		await keys.setSession(id, session.serialize())
 	},
 	isTrustedIdentity: () => {
 		return true
 	},
-	loadPreKey: async(id: number | string) => {
-		const keyId = id.toString()
-		const { [keyId]: key } = await keys.get('pre-key', [keyId])
+	loadPreKey: async(id: number) => {
+		const key = await keys.getPreKey(id)
 		if(key) {
 			return {
 				privKey: Buffer.from(key.private),
@@ -105,7 +105,7 @@ export const signalStorage = ({ creds, keys }: SignalAuthState) => ({
 			}
 		}
 	},
-	removePreKey: (id: number) => keys.set({ 'pre-key': { [id]: null } }),
+	removePreKey: (id: number) => keys.setPreKey(id, null),
 	loadSignedPreKey: (keyId: number) => {
 		const key = creds.signedPreKey
 		return {
@@ -113,12 +113,12 @@ export const signalStorage = ({ creds, keys }: SignalAuthState) => ({
 			pubKey: Buffer.from(key.keyPair.public)
 		}
 	},
-	loadSenderKey: async(keyId: string) => {
-		const { [keyId]: key } = await keys.get('sender-key', [keyId])
+	loadSenderKey: async(keyId) => {
+		const key = await keys.getSenderKey(keyId)
 		if(key) return new SenderKeyRecord(key)
 	},
 	storeSenderKey: async(keyId, key) => {
-		await keys.set({ 'sender-key': { [keyId]: key.serialize() } })
+		await keys.setSenderKey(keyId, key.serialize())
 	},
 	getOurRegistrationId: () => (
 		creds.registrationId
@@ -148,10 +148,10 @@ export const processSenderKeyMessage = async(
 	const senderName = jidToSignalSenderKeyName(item.groupId, authorJid)
 
 	const senderMsg = new SenderKeyDistributionMessage(null, null, null, null, item.axolotlSenderKeyDistributionMessage)
-	const { [senderName]: senderKey } = await auth.keys.get('sender-key', [senderName])
+	const senderKey = await auth.keys.getSenderKey(senderName)
 	if(!senderKey) {
 		const record = new SenderKeyRecord()
-		await auth.keys.set({ 'sender-key': { [senderName]: record } })
+		await auth.keys.setSenderKey(senderName, record)
 	}
 	await builder.process(senderName, senderMsg)
 }
@@ -188,10 +188,10 @@ export const encryptSenderKeyMsgSignalProto = async(group: string, data: Uint8Ar
 	const senderName = jidToSignalSenderKeyName(group, meId)
 	const builder = new GroupSessionBuilder(storage)
 
-	const { [senderName]: senderKey } = await auth.keys.get('sender-key', [senderName])
+	const senderKey = await auth.keys.getSenderKey(senderName)
 	if(!senderKey) {
 		const record = new SenderKeyRecord()
-		await auth.keys.set({ 'sender-key': { [senderName]: record } })
+		await auth.keys.setSenderKey(senderName, record)
 	}
 
 	const senderKeyDistributionMessage = await builder.create(senderName)
@@ -202,7 +202,7 @@ export const encryptSenderKeyMsgSignalProto = async(group: string, data: Uint8Ar
 	}
 }
 
-export const parseAndInjectE2ESessions = async(node: BinaryNode, auth: SignalAuthState) => {
+export const parseAndInjectE2ESession = async(node: BinaryNode, auth: SignalAuthState) => {
 	const extractKey = (key: BinaryNode) => (
 		key ? ({
             keyId: getBinaryNodeChildUInt(key, 'id', 3),
@@ -212,30 +212,23 @@ export const parseAndInjectE2ESessions = async(node: BinaryNode, auth: SignalAut
             signature: getBinaryNodeChildBuffer(key, 'signature'),
         }) : undefined
 	)
-	const nodes = getBinaryNodeChildren(getBinaryNodeChild(node, 'list'), 'user')
-	for(const node of nodes) {
-		assertNodeErrorFree(node)
+	node = getBinaryNodeChild(getBinaryNodeChild(node, 'list'), 'user')
+	assertNodeErrorFree(node)
+	
+	const signedKey = getBinaryNodeChild(node, 'skey')
+	const key = getBinaryNodeChild(node, 'key')
+	const identity = getBinaryNodeChildBuffer(node, 'identity')
+	const jid = node.attrs.jid
+	const registrationId = getBinaryNodeChildUInt(node, 'registration', 4)
+
+	const device = {
+		registrationId,
+		identityKey: generateSignalPubKey(identity),
+		signedPreKey: extractKey(signedKey),
+		preKey: extractKey(key)
 	}
-	await Promise.all(
-		nodes.map(
-			async node => {
-				const signedKey = getBinaryNodeChild(node, 'skey')
-				const key = getBinaryNodeChild(node, 'key')
-				const identity = getBinaryNodeChildBuffer(node, 'identity')
-				const jid = node.attrs.jid
-				const registrationId = getBinaryNodeChildUInt(node, 'registration', 4)
-			
-				const device = {
-					registrationId,
-					identityKey: generateSignalPubKey(identity),
-					signedPreKey: extractKey(signedKey),
-					preKey: extractKey(key)
-				}
-				const cipher = new libsignal.SessionBuilder(signalStorage(auth), jidToSignalProtocolAddress(jid))
-				await cipher.initOutgoing(device)
-			}
-		)
-	)
+	const cipher = new libsignal.SessionBuilder(signalStorage(auth), jidToSignalProtocolAddress(jid))
+	await cipher.initOutgoing(device)
 }
 
 export const extractDeviceJids = (result: BinaryNode, myJid: string, excludeZeroDevices: boolean) => {

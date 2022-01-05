@@ -10,13 +10,7 @@ const startSock = () => {
     const sock = makeWASocket({
         logger: P({ level: 'trace' }),
         printQRInTerminal: true,
-        auth: state,
-        // implement to handle retries
-        getMessage: async key => {
-            return {
-                conversation: 'hello'
-            }
-        }
+        auth: state
     })
 
     const sendMessageWTyping = async(msg: AnyMessageContent, jid: string) => {
