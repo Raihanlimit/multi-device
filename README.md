@@ -179,7 +179,7 @@ export type BaileysEventMap = {
     /** auth credentials updated -- some pre key state, device ID etc. */
     'creds.update': Partial<AuthenticationCreds>
     /** set chats (history sync), messages are reverse chronologically sorted */
-    'chats.set': { chats: Chat[], messages: WAMessage[] }
+    'chats.set': { chats: Chat[], messages: WAMessage[], contacts: Contact[] }
     /** upsert chats */
     'chats.upsert': Chat[]
     /** update the given chats */
@@ -264,7 +264,7 @@ const buttons = [
 
 const buttonMessage = {
     text: "Hi it's button message",
-    footerText: 'Hello World',
+    footer: 'Hello World',
     buttons: buttons,
     headerType: 1
 }
@@ -273,18 +273,46 @@ const sendMsg = await sock.sendMessage(id, buttonMessage)
 
 //send a template message!
 const templateButtons = [
-  {index: 1, urlButton: {displayText: '⭐ Star Baileys on GitHub!', url: 'https://github.com/adiwajshing/Baileys'}},
-  {index: 2, callButton: {displayText: 'Call me!', phoneNumber: '+1 (234) 5678-901'}},
-  {index: 3, quickReplyButton: {displayText: 'This is a reply, just like normal buttons!', id: 'id-like-buttons-message'}},
+    {index: 1, urlButton: {displayText: '⭐ Star Baileys on GitHub!', url: 'https://github.com/adiwajshing/Baileys'}},
+    {index: 2, callButton: {displayText: 'Call me!', phoneNumber: '+1 (234) 5678-901'}},
+    {index: 3, quickReplyButton: {displayText: 'This is a reply, just like normal buttons!', id: 'id-like-buttons-message'}},
 ]
 
-const buttonMessage = {
+const templateMessage = {
     text: "Hi it's a template message",
     footer: 'Hello World',
-    templateButtons: templateButttons
+    templateButtons: templateButtons
 }
 
 const sendMsg = await sock.sendMessage(id, templateMessage)
+
+// send a list message!
+const sections = [
+    {
+	title: "Section 1",
+	rows: [
+	    {title: "Option 1", rowId: "option1"},
+	    {title: "Option 2", rowId: "option2", description: "This is a description"}
+	]
+    },
+   {
+	title: "Section 2",
+	rows: [
+	    {title: "Option 3", rowId: "option3"},
+	    {title: "Option 4", rowId: "option4", description: "This is a description V2"}
+	]
+    },
+]
+
+const listMessage = {
+  text: "This is a list",
+  footer: "nice footer, link: https://google.com",
+  title: "Amazing boldfaced list title",
+  buttonText: "Required, text on the button to vie the list",
+  sections
+}
+
+const sendMsg = await sock.sendMessage(id, listMessage)
 ```
 
 ### Media Messages
@@ -300,14 +328,6 @@ await sock.sendMessage(
     id, 
     { 
         video: fs.readFileSync("Media/ma_gif.mp4"), 
-        caption: "hello!",
-        gifPlayback: true
-    }
-)
-await sock.sendMessage(
-    id, 
-    { 
-        video: "./Media/ma_gif.mp4", 
         caption: "hello!",
         gifPlayback: true
     }
@@ -369,7 +389,7 @@ const sendMsg = await sock.sendMessage(id, templateMessage)
     - It must be in the format ```[country code][phone number]@s.whatsapp.net```, for example ```+19999999999@s.whatsapp.net``` for people. For groups, it must be in the format ``` 123456789-123345@g.us ```. 
     - For broadcast lists it's `[timestamp of creation]@broadcast`.
     - For stories, the ID is `status@broadcast`.
-- For media messages, the thumbnail can be generated automatically for images & stickers. Thumbnails for videos can also be generated automatically, though, you need to have `ffmpeg` installed on your system.
+- For media messages, the thumbnail can be generated automatically for images & stickers provided you add `jimp` or `sharp` as a dependency in your project using `yarn add jimp` or `yarn add sharp`. Thumbnails for videos can also be generated automatically, though, you need to have `ffmpeg` installed on your system.
 - **MiscGenerationOptions**: some extra info about the message. It can have the following __optional__ values:
     ``` ts
     const info: MessageOptions = {
@@ -475,7 +495,7 @@ WA uses an encrypted form of communication to send chat/app updates. This has be
 - Archive a chat
   ``` ts
   const lastMsgInChat = await getLastMessageInChat('123456@s.whatsapp.net') // implement this on your end
-  await sock.chatModify({ archive: true }, '123456@s.whatsapp.net', [lastMsgInChat])
+  await sock.chatModify({ archive: true, lastMessages: [lastMsgInChat] }, '123456@s.whatsapp.net')
   ```
 - Mute/unmute a chat
   ``` ts
@@ -488,12 +508,11 @@ WA uses an encrypted form of communication to send chat/app updates. This has be
   ``` ts
   const lastMsgInChat = await getLastMessageInChat('123456@s.whatsapp.net') // implement this on your end
   // mark it unread
-  await sock.chatModify({ markRead: false }, '123456@s.whatsapp.net', [lastMsgInChat])
+  await sock.chatModify({ markRead: false, lastMessages: [lastMsgInChat] }, '123456@s.whatsapp.net')
   ```
 
 - Delete message for me
   ``` ts
-  // mark it unread
   await sock.chatModify(
       { clear: { message: { id: 'ATWYHDNNWU81732J', fromMe: true } } }, 
       '123456@s.whatsapp.net', 
@@ -563,6 +582,11 @@ await sock.sendMessage(
     await sock.updateBlockStatus("xyz@s.whatsapp.net", "block") // Block user
     await sock.updateBlockStatus("xyz@s.whatsapp.net", "unblock") // Unblock user
     ```
+- To get a business profile, such as description, category
+    ```ts
+    const profile = await sock.getBusinessProfile("xyz@s.whatsapp.net")
+    console.log("business description: " + profile.description + ", category: " + profile.category)
+    ```
 Of course, replace ``` xyz ``` with an actual ID. 
 
 ## Groups
@@ -608,15 +632,20 @@ Of course, replace ``` xyz ``` with an actual ID.
     const code = await sock.groupInviteCode("abcd-xyz@g.us")
     console.log("group code: " + code)
     ```
+- To revoke the invite code in a group
+    ```ts
+    const code = await sock.groupRevokeInvite("abcd-xyz@g.us")
+    console.log("New group code: " + code)
+    ```
 - To query the metadata of a group
     ``` ts
     const metadata = await sock.groupMetadata("abcd-xyz@g.us") 
     console.log(metadata.id + ", title: " + metadata.subject + ", description: " + metadata.desc)
     ```
-- To join the group using the invitation code (not supported yet)
+- To join the group using the invitation code
     ``` ts
-    const response = await sock.acceptInvite("xxx")
-    console.log("joined to: " + response.gid)
+    const response = await sock.groupAcceptInvite("xxx")
+    console.log("joined to: " + response)
     ```
     Of course, replace ``` xxx ``` with invitation code.
 

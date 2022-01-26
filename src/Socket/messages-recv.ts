@@ -1,21 +1,24 @@
 
-import { SocketConfig, WAMessageStubType, ParticipantAction, Chat, GroupMetadata, WAMessageKey } from "../Types"
+import { SocketConfig, WAMessageStubType, ParticipantAction, Chat, GroupMetadata, WAMessageKey, Contact } from "../Types"
 import { decodeMessageStanza, encodeBigEndian, toNumber, downloadHistory, generateSignalPubKey, xmppPreKey, xmppSignedPreKey } from "../Utils"
-import { BinaryNode, jidDecode, jidEncode, isJidStatusBroadcast, areJidsSameUser, getBinaryNodeChildren, jidNormalizedUser, getAllBinaryNodeChildren, BinaryNodeAttributes } from '../WABinary'
+import { BinaryNode, jidDecode, jidEncode, isJidStatusBroadcast, areJidsSameUser, getBinaryNodeChildren, jidNormalizedUser, getAllBinaryNodeChildren, BinaryNodeAttributes, isJidGroup } from '../WABinary'
 import { proto } from "../../WAProto"
 import { KEY_BUNDLE_TYPE } from "../Defaults"
 import { makeChatsSocket } from "./chats"
 import { extractGroupMetadata } from "./groups"
-import { Boom } from "@hapi/boom"
+
+const STATUS_MAP: { [_: string]: proto.WebMessageInfo.WebMessageInfoStatus } = {
+    'played': proto.WebMessageInfo.WebMessageInfoStatus.PLAYED,
+    'read': proto.WebMessageInfo.WebMessageInfoStatus.READ,
+    'read-self': proto.WebMessageInfo.WebMessageInfoStatus.READ
+}
 
 const getStatusFromReceiptType = (type: string | undefined) => {
-    if(type === 'read' || type === 'read-self') {
-        return proto.WebMessageInfo.WebMessageInfoStatus.READ
-    }
+    const status = STATUS_MAP[type]
     if(typeof type === 'undefined') {
         return proto.WebMessageInfo.WebMessageInfoStatus.DELIVERY_ACK
-    }
-    return undefined
+    } 
+    return status
 }
 
 export const makeMessagesRecvSocket = (config: SocketConfig) => {
@@ -25,11 +28,11 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		ev,
         authState,
 		ws,
-        assertSession,
+        assertSessions,
         assertingPreKeys,
 		sendNode,
         relayMessage,
-        sendDeliveryReceipt,
+        sendReceipt,
         resyncMainAppState,
 	} = sock
 
@@ -146,12 +149,12 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
                     if(keys?.length) {
                         let newAppStateSyncKeyId = ''
                         for(const { keyData, keyId } of keys) {
-                            const str = Buffer.from(keyId.keyId!).toString('base64')
+                            const strKeyId = Buffer.from(keyId.keyId!).toString('base64')
                             
-                            logger.info({ str }, 'injecting new app state sync key')
-                            await authState.keys.setAppStateSyncKey(str, keyData)
+                            logger.info({ strKeyId }, 'injecting new app state sync key')
+                            await authState.keys.set({ 'app-state-sync-key': { [strKeyId]: keyData } })
     
-                            newAppStateSyncKeyId = str
+                            newAppStateSyncKeyId = strKeyId
                         }
                         
                         ev.emit('creds.update', { myAppStateKeyId: newAppStateSyncKeyId })
@@ -164,7 +167,10 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
                 case proto.ProtocolMessage.ProtocolMessageType.REVOKE:
                     ev.emit('messages.update', [
                         { 
-                            key: protocolMsg.key, 
+                            key: {
+                                ...message.key,
+                                id: protocolMsg.key!.id
+                            }, 
                             update: { message: null, messageStubType: WAMessageStubType.REVOKE, key: message.key } 
                         }
                     ])
@@ -223,11 +229,18 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 
     const processHistoryMessage = (item: proto.HistorySync) => {
         const messages: proto.IWebMessageInfo[] = []
+        const contacts: Contact[] = []
         switch(item.syncType) {
             case proto.HistorySync.HistorySyncHistorySyncType.INITIAL_BOOTSTRAP:
                 const chats = item.conversations!.map(
                     c => {
                         const chat: Chat = { ...c }
+                        if(chat.name) {
+                            contacts.push({
+                                id: chat.id,
+                                name: chat.name
+                            })
+                        }
                         //@ts-expect-error
                         delete chat.messages
                         for(const msg of c.messages || []) {
@@ -238,7 +251,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
                         return chat
                     }
                 )
-                ev.emit('chats.set', { chats, messages })
+                ev.emit('chats.set', { chats, messages, contacts })
             break
             case proto.HistorySync.HistorySyncHistorySyncType.RECENT:
                 // push remaining messages
@@ -252,10 +265,12 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
                 }
             break
             case proto.HistorySync.HistorySyncHistorySyncType.PUSH_NAME:
-                const contacts = item.pushnames.map(
-                    p => ({ notify: p.pushname, id: p.id })
+                contacts.push(
+                    ...item.pushnames.map(
+                        p => ({ notify: p.pushname, id: p.id })
+                    )
                 )
-                ev.emit('contacts.upsert', contacts)
+                ev.emit('chats.set', { chats: [], messages: [], contacts })
             break
             case proto.HistorySync.HistorySyncHistorySyncType.INITIAL_STATUS_V3:
                 // TODO
@@ -345,102 +360,23 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
     }
     // recv a message
     ws.on('CB:message', async(stanza: BinaryNode) => {
-        const dec = await decodeMessageStanza(stanza, authState)
-        const fullMessages: proto.IWebMessageInfo[] = []
-
-        const { attrs } = stanza
-        const isGroup = !!stanza.attrs.participant
-        const sender = (attrs.participant || attrs.from)?.toString()
-        const isMe = areJidsSameUser(sender, authState.creds.me!.id)
-
-        const remoteJid = jidNormalizedUser(dec.chatId)
-        
-        const key: WAMessageKey = {
-            remoteJid,
-            fromMe: isMe,
-            id: dec.msgId,
-            participant: dec.participant
-        }
-        const partialMsg: Partial<proto.IWebMessageInfo> = {
-            messageTimestamp: dec.timestamp,
-            pushName: dec.pushname
-        }
-
-        if(!dec.failures.length) {
-            await sendMessageAck(stanza, { class: 'receipt' })
-        }
-        
-        // if there were some successful decryptions
-        if(dec.successes.length) {
-            // send message receipt
-            let recpAttrs: { [_: string]: any }
-            if(isMe) {
-                recpAttrs =  {
-                    type: 'sender',
-                    id: stanza.attrs.id,
-                    to: stanza.attrs.from,
-                }
-                if(isGroup) {
-                    recpAttrs.participant = stanza.attrs.participant
-                } else {
-                    recpAttrs.recipient = stanza.attrs.recipient
-                }
-            } else {
-                const isStatus = isJidStatusBroadcast(stanza.attrs.from)
-                recpAttrs = {
-                    id: stanza.attrs.id,
-                }
-                if(isGroup || isStatus) {
-                    recpAttrs.participant = stanza.attrs.participant
-                    recpAttrs.to = dec.chatId
-                } else {
-                    recpAttrs.to = jidNormalizedUser(dec.chatId)
-                }
-            }
-
-            await sendNode({ tag: 'receipt', attrs: recpAttrs })
-            logger.debug({ msgId: dec.msgId }, 'sent message receipt')
-
-            await sendDeliveryReceipt(dec.chatId, dec.participant, [dec.msgId])
-            logger.debug({ msgId: dec.msgId }, 'sent delivery receipt')
-        }
-
-        for(const msg of dec.successes) {
-            const message = msg.deviceSentMessage?.message || msg
-            fullMessages.push({
-                key,
-                message,
-                status: isMe ? proto.WebMessageInfo.WebMessageInfoStatus.SERVER_ACK : null,
-                ...partialMsg
-            })
-        }
-        
-		for(const { error } of dec.failures) {
+        const msg = await decodeMessageStanza(stanza, authState)
+        // message failed to decrypt
+        if(msg.messageStubType === proto.WebMessageInfo.WebMessageInfoStubType.CIPHERTEXT) {
             logger.error(
-                { msgId: dec.msgId, trace: error.stack, data: error.data }, 
+                { msgId: msg.key.id, params: msg.messageStubParameters }, 
                 'failure in decrypting message'
             )
             await sendRetryRequest(stanza)
-            
-            fullMessages.push({
-                key,
-                messageStubType: WAMessageStubType.CIPHERTEXT,
-                messageStubParameters: [error.message],
-                ...partialMsg
-            })
-        }
-
-        if(fullMessages.length) {
-            ev.emit(
-                'messages.upsert', 
-                { 
-                    messages: fullMessages.map(m => proto.WebMessageInfo.fromObject(m)), 
-                    type: stanza.attrs.offline ? 'append' : 'notify' 
-                }
-            )
         } else {
-            logger.warn({ stanza }, `received node with 0 messages`)
+            await sendMessageAck(stanza, { class: 'receipt' })
+            // no type in the receipt => message delivered
+            await sendReceipt(msg.key.remoteJid!, msg.key.participant, [msg.key.id!], undefined)
+            logger.debug({ msg: msg.key }, 'sent delivery receipt')
         }
+        
+        msg.key.remoteJid = jidNormalizedUser(msg.key.remoteJid!)
+        ev.emit('messages.upsert', { messages: [msg], type: stanza.attrs.offline ? 'append' : 'notify' })
     })
 
     ws.on('CB:ack,class:message', async(node: BinaryNode) => {
@@ -465,16 +401,20 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
     })
 
     const sendMessagesAgain = async(key: proto.IMessageKey, ids: string[]) => {
-        const participant = key.participant || key.remoteJid
-        await assertSession(participant, true)
-
-        logger.debug({ key, ids }, 'recv retry request, forced new session')
-
         const msgs = await Promise.all(
             ids.map(id => (
                 config.getMessage({ ...key, id })
             ))
         )
+
+        const participant = key.participant || key.remoteJid
+        await assertSessions([participant], true)
+
+        if(isJidGroup(key.remoteJid)) {
+            await authState.keys.set({ 'sender-key-memory': { [key.remoteJid]: null } })
+        }
+
+        logger.debug({ participant }, 'forced new session for retry recp')
 
         for(let i = 0; i < msgs.length;i++) {
             if(msgs[i]) {
@@ -489,9 +429,12 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
     }
 
     const handleReceipt = async(node: BinaryNode) => {
+        let shouldAck = true
+
         const { attrs, content } = node
-        const remoteJid = attrs.recipient || attrs.from 
-        const fromMe = attrs.recipient ? false : true
+        const isNodeFromMe = areJidsSameUser(attrs.participant || attrs.from, authState.creds.me?.id)
+        const remoteJid = !isNodeFromMe ? attrs.from : attrs.recipient
+        const fromMe = !attrs.recipient
 
         const ids = [attrs.id]
         if(Array.isArray(content)) {
@@ -507,7 +450,15 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
         }
 
         const status = getStatusFromReceiptType(attrs.type)
-        if(typeof status !== 'undefined' && !areJidsSameUser(attrs.from, authState.creds.me?.id)) {
+        if(
+            typeof status !== 'undefined' &&
+            (
+                // basically, we only want to know when a message from us has been delivered to/read by the other person
+                // or another device of ours has read some messages
+                status > proto.WebMessageInfo.WebMessageInfoStatus.DELIVERY_ACK ||
+                !isNodeFromMe
+            )
+        ) {
             ev.emit('messages.update', ids.map(id => ({
                 key: { ...key, id },
                 update: { status }
@@ -515,10 +466,25 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
         }
 
         if(attrs.type === 'retry') {
-            await sendMessagesAgain(key, ids)
+            // correctly set who is asking for the retry
+            key.participant = key.participant || attrs.from
+            if(key.fromMe) {
+                try {
+                    logger.debug({ attrs }, 'recv retry request')
+                    await sendMessagesAgain(key, ids)
+                } catch(error) {
+                    logger.error({ key, ids, trace: error.stack }, 'error in sending message again')
+                    shouldAck = false
+                }
+            } else {
+                logger.info({ attrs, key }, 'recv retry for not fromMe message')
+            }
         }
 
-        await sendMessageAck(node, { class: 'receipt', type: attrs.type })
+        if(shouldAck) {
+            await sendMessageAck(node, { class: 'receipt', type: attrs.type })
+        }
+        
     }
 
     ws.on('CB:receipt', handleReceipt)
@@ -543,34 +509,36 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
         }
     })
 
-    ev.on('messages.upsert', async({ messages }) => {
-        const chat: Partial<Chat> = { id: messages[0].key.remoteJid }
-        const contactNameUpdates: { [_: string]: string } = { }
-        for(const msg of messages) {
-            if(!!msg.pushName) {
-                const jid = msg.key.fromMe ? jidNormalizedUser(authState.creds.me!.id) : (msg.key.participant || msg.key.remoteJid)
-                contactNameUpdates[jid] = msg.pushName
-                // update our pushname too
-                if(msg.key.fromMe && authState.creds.me?.name !== msg.pushName) {
-                    ev.emit('creds.update', { me: { ...authState.creds.me!, name: msg.pushName! } })
+    ev.on('messages.upsert', async({ messages, type }) => {
+        if(type === 'notify' || type === 'append') {
+            const chat: Partial<Chat> = { id: messages[0].key.remoteJid }
+            const contactNameUpdates: { [_: string]: string } = { }
+            for(const msg of messages) {
+                if(!!msg.pushName) {
+                    const jid = msg.key.fromMe ? jidNormalizedUser(authState.creds.me!.id) : (msg.key.participant || msg.key.remoteJid)
+                    contactNameUpdates[jid] = msg.pushName
+                    // update our pushname too
+                    if(msg.key.fromMe && authState.creds.me?.name !== msg.pushName) {
+                        ev.emit('creds.update', { me: { ...authState.creds.me!, name: msg.pushName! } })
+                    }
                 }
-            }
 
-            await processMessage(msg, chat)
-            if(!!msg.message && !msg.message!.protocolMessage) {
-                chat.conversationTimestamp = toNumber(msg.messageTimestamp)
-                if(!msg.key.fromMe) {
-                    chat.unreadCount = (chat.unreadCount || 0) + 1
+                await processMessage(msg, chat)
+                if(!!msg.message && !msg.message!.protocolMessage) {
+                    chat.conversationTimestamp = toNumber(msg.messageTimestamp)
+                    if(!msg.key.fromMe) {
+                        chat.unreadCount = (chat.unreadCount || 0) + 1
+                    }
                 }
             }
-        }
-        if(Object.keys(chat).length > 1) {
-            ev.emit('chats.update', [ chat ])
-        }
-        if(Object.keys(contactNameUpdates).length) {
-            ev.emit('contacts.update', Object.keys(contactNameUpdates).map(
-                id => ({ id, notify: contactNameUpdates[id] })
-            ))
+            if(Object.keys(chat).length > 1) {
+                ev.emit('chats.update', [ chat ])
+            }
+            if(Object.keys(contactNameUpdates).length) {
+                ev.emit('contacts.update', Object.keys(contactNameUpdates).map(
+                    id => ({ id, notify: contactNameUpdates[id] })
+                ))
+            }
         }
     })
 

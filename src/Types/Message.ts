@@ -28,7 +28,7 @@ export type DownloadableMessage = { mediaKey?: Uint8Array, directPath?: string, 
 export type MediaConnInfo = {
     auth: string 
     ttl: number
-    hosts: { hostname: string }[]
+    hosts: { hostname: string, maxContentLengthBytes: number }[]
     fetchDate: Date
 }
 
@@ -58,6 +58,16 @@ type Templatable = {
 
     footer?: string
 }
+type Listable = {
+    /** Sections of the List */
+    sections?: proto.ISection[]
+
+    /** Title of a List Message only */
+    title?: string
+
+    /** Text of the bnutton on the list (required) */
+    buttonText?: string
+}
 type WithDimensions = {
     width?: number
     height?: number
@@ -77,7 +87,7 @@ export type AnyMediaMessageContent = (
     } & Mentionable & Buttonable & Templatable & WithDimensions) | {
         audio: WAMediaUpload
         /** if set to true, will send as a `voice note` */
-        pttAudio?: boolean
+        ptt?: boolean
         /** optionally tell the duration of the audio */
         seconds?: number
     } | ({
@@ -93,7 +103,7 @@ export type AnyRegularMessageContent = (
     ({
 	    text: string
     } 
-    & Mentionable & Buttonable & Templatable) | 
+    & Mentionable & Buttonable & Templatable & Listable) | 
     AnyMediaMessageContent | 
     {
         contacts: {
@@ -140,7 +150,7 @@ export type MessageGenerationOptionsFromContent = MiscMessageGenerationOptions &
 	userJid: string
 }
 
-export type WAMediaUploadFunction = (readStream: ReadStream, opts: { fileEncSha256B64: string, mediaType: MediaType, timeoutMs?: number }) => Promise<{ mediaUrl: string }>
+export type WAMediaUploadFunction = (readStream: Readable, opts: { fileEncSha256B64: string, mediaType: MediaType, timeoutMs?: number }) => Promise<{ mediaUrl: string, directPath: string }>
 
 export type MediaGenerationOptions = {
 	logger?: Logger
@@ -155,7 +165,7 @@ export type MessageContentGenerationOptions = MediaGenerationOptions & {
 }
 export type MessageGenerationOptions = MessageContentGenerationOptions & MessageGenerationOptionsFromContent
 
-export type MessageUpdateType = 'append' | 'notify' | 'prepend'
+export type MessageUpdateType = 'append' | 'notify' | 'prepend' | 'last' | 'replace'
 
 export type MessageInfoEventMap = { [jid: string]: Date }
 export interface MessageInfo {
