@@ -256,7 +256,7 @@ export const getGotStream = async(url: string | URL, options: Options & { isStre
 }
 
 export const encryptedStream = async(
-    media: WAMediaUpload, 
+    media: WAMediaUpload
 
         encWriteStream.push(null)
 
