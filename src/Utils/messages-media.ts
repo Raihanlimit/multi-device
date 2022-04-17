@@ -1,5 +1,5 @@
 import { Boom } from '@hapi/boom'
-import { AxiosRequestConfig } from 'axios
+import { AxiosRequestConfig } from 'axios'
 import type { Options, Response } from 'got'
 import { exec } from 'child_process'
 import * as Crypto from 'crypto'
@@ -256,7 +256,7 @@ export const getGotStream = async(url: string | URL, options: Options & { isStre
 }
 
 export const encryptedStream = async(
-    media: WAMediaUpload
+    media: WAMediaUpload,
 
         encWriteStream.push(null)
 
