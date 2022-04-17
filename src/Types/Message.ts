@@ -1,10 +1,9 @@
-import type { ReadStream } from "fs"
-import type { Logger } from "pino"
-import type { URL } from "url"
-import type NodeCache from "node-cache"
-import type { GroupMetadata } from "./GroupMetadata"
-import type { Readable } from "stream"
+import type NodeCache from 'node-cache'
+import type { Logger } from 'pino'
+import type { Readable } from 'stream'
+import type { URL } from 'url'
 import { proto } from '../../WAProto'
+import type { GroupMetadata } from './GroupMetadata'
 
 // export the WAMessage Prototypes
 export { proto as WAProto }
@@ -25,8 +24,10 @@ export type MessageType = keyof proto.Message
 
 export type DownloadableMessage = { mediaKey?: Uint8Array, directPath?: string, url?: string }
 
+export type MessageReceiptType = 'read' | 'read-self' | 'hist_sync' | 'peer_msg' | 'sender' | undefined
+
 export type MediaConnInfo = {
-    auth: string 
+    auth: string
     ttl: number
     hosts: { hostname: string, maxContentLengthBytes: number }[]
     fetchDate: Date
@@ -78,7 +79,7 @@ export type AnyMediaMessageContent = (
         image: WAMediaUpload
         caption?: string
         jpegThumbnail?: string
-    } & Mentionable & Buttonable & Templatable & WithDimensions) | 
+    } & Mentionable & Buttonable & Templatable & WithDimensions) |
     ({
         video: WAMediaUpload
         caption?: string
@@ -96,23 +97,25 @@ export type AnyMediaMessageContent = (
         document: WAMediaUpload
         mimetype: string
         fileName?: string
-    } & Buttonable & Templatable)) & 
+    } & Buttonable & Templatable)) &
     { mimetype?: string }
 
 export type AnyRegularMessageContent = (
     ({
 	    text: string
-    } 
-    & Mentionable & Buttonable & Templatable & Listable) | 
-    AnyMediaMessageContent | 
+    }
+    & Mentionable & Buttonable & Templatable & Listable) |
+    AnyMediaMessageContent |
     {
         contacts: {
             displayName?: string
             contacts: proto.IContactMessage[]
         }
-    } | 
-    {  
+    } |
+    {
         location: WALocationMessage
+    } | {
+        react: proto.IReactionMessage
     }
 ) & ViewOnce
 
@@ -121,7 +124,7 @@ export type AnyMessageContent = AnyRegularMessageContent | {
 	force?: boolean
 } | {
 	delete: WAMessageKey
-}  | {
+} | {
 	disappearingMessagesInChat: boolean | number
 }
 
@@ -165,16 +168,12 @@ export type MessageContentGenerationOptions = MediaGenerationOptions & {
 }
 export type MessageGenerationOptions = MessageContentGenerationOptions & MessageGenerationOptionsFromContent
 
-export type MessageUpdateType = 'append' | 'notify' | 'prepend' | 'last' | 'replace'
+export type MessageUpdateType = 'append' | 'notify' | 'replace'
 
-export type MessageInfoEventMap = { [jid: string]: Date }
-export interface MessageInfo {
-    reads: MessageInfoEventMap
-    deliveries: MessageInfoEventMap
-}
+export type MessageUserReceipt = proto.IUserReceipt
 
 export type WAMessageUpdate = { update: Partial<WAMessage>, key: proto.IMessageKey }
 
 export type WAMessageCursor = { before: WAMessageKey | undefined } | { after: WAMessageKey | undefined }
 
-export type MessageInfoUpdate = { key: proto.IMessageKey, update: Partial<MessageInfo> }
+export type MessageUserReceiptUpdate = { key: proto.IMessageKey, receipt: MessageUserReceipt }

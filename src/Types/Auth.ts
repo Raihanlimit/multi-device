@@ -1,5 +1,5 @@
-import type { Contact } from "./Contact"
-import type { proto } from "../../WAProto"
+import type { proto } from '../../WAProto'
+import type { Contact } from './Contact'
 
 export type KeyPair = { public: Uint8Array, private: Uint8Array }
 export type SignedKeyPair = { keyPair: KeyPair, signature: Uint8Array, keyId: number }
@@ -13,10 +13,10 @@ export type SignalIdentity = {
 	identifierKey: Uint8Array
 }
 
-export type LTHashState = { 
+export type LTHashState = {
     version: number
     hash: Buffer
-    indexValueMap: { 
+    indexValueMap: {
         [indexMacBase64: string]: { valueMac: Uint8Array | Buffer }
     }
 }
@@ -27,10 +27,15 @@ export type SignalCreds = {
     readonly registrationId: number
 }
 
+export type AccountSettings = {
+    /** unarchive chats when a new message is received */
+    unarchiveChats: boolean
+}
+
 export type AuthenticationCreds = SignalCreds & {
     readonly noiseKey: KeyPair
     readonly advSecretKey: string
-    
+
     me?: Contact
     account?: proto.IADVSignedDeviceIdentity
     signalIdentities?: SignalIdentity[]
@@ -40,6 +45,7 @@ export type AuthenticationCreds = SignalCreds & {
     nextPreKeyId: number
 
     lastAccountSyncTimestamp?: number
+    accountSettings: AccountSettings
 }
 
 export type SignalDataTypeMap = {
