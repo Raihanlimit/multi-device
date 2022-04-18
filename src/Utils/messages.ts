@@ -54,63 +54,48 @@ const MessageTypeProto = {
 const ButtonType = proto.ButtonsMessage.ButtonsMessageHeaderType
 
 export const prepareWAMessageMedia = async(
-	message: AnyMediaMessageContent,
+	message: AnyMediaMessageContent, 
 	options: MediaGenerationOptions
 ) => {
-	const logger = options.logger
-
 	let mediaType: typeof MEDIA_KEYS[number]
 	for(const key of MEDIA_KEYS) {
 		if(key in message) {
 			mediaType = key
 		}
 	}
-
-	const uploadData: MediaUploadData = {
+	const uploadData: MediaUploadData = { 
 		...message,
+		[mediaType]: undefined,
 		media: message[mediaType]
 	}
-	delete uploadData[mediaType]
 	// check if cacheable + generate cache key
-	const cacheableKey = typeof uploadData.media === 'object' &&
-			('url' in uploadData.media) &&
-			!!uploadData.media.url &&
+	const cacheableKey = typeof uploadData.media === 'object' && 
+			('url' in uploadData.media) && 
+			!!uploadData.media.url && 
 			!!options.mediaCache && (
-	// generate the key
-		mediaType + ':' + uploadData.media.url!.toString()
-	)
-
-	if(mediaType === 'document' && !uploadData.fileName) {
-		uploadData.fileName = 'file'
-	}
-
-	if(!uploadData.mimetype) {
-		uploadData.mimetype = MIMETYPE_MAP[mediaType]
-	}
-
+				// generate the key
+				mediaType + ':' + uploadData.media.url!.toString()
+			)
 	// check for cache hit
 	if(cacheableKey) {
 		const mediaBuff: Buffer = options.mediaCache!.get(cacheableKey)
 		if(mediaBuff) {
-			logger?.debug({ cacheableKey }, 'got media cache hit')
-
-			const obj = WAProto.Message.decode(mediaBuff)
-			const key = `${mediaType}Message`
-
-			delete uploadData.media
-			Object.assign(obj[key], { ...uploadData })
-
-			return obj
+			return WAProto.Message.decode(mediaBuff)
 		}
 	}
-
+	if(mediaType === 'document' && !uploadData.fileName) {
+		uploadData.fileName = 'file'
+	}
+	if(!uploadData.mimetype) {
+		uploadData.mimetype = MIMETYPE_MAP[mediaType]
+	}
 	const requiresDurationComputation = mediaType === 'audio' && typeof uploadData.seconds === 'undefined'
-	const requiresThumbnailComputation = (mediaType === 'image' || mediaType === 'video') &&
+	const requiresThumbnailComputation = (mediaType === 'image' || mediaType === 'video') && 
 										(typeof uploadData['jpegThumbnail'] === 'undefined')
 	const requiresOriginalForSomeProcessing = requiresDurationComputation || requiresThumbnailComputation
 	const {
 		mediaKey,
-		encWriteStream,
+		encBodyPath,
 		bodyPath,
 		fileEncSha256,
 		fileSha256,
@@ -118,68 +103,51 @@ export const prepareWAMessageMedia = async(
 		didSaveToTmpPath
 	} = await encryptedStream(uploadData.media, mediaType, requiresOriginalForSomeProcessing)
 	 // url safe Base64 encode the SHA256 hash of the body
-	const fileEncSha256B64 = encodeURIComponent(
+	const fileEncSha256B64 = encodeURIComponent( 
 		fileEncSha256.toString('base64')
-			.replace(/\+/g, '-')
-			.replace(/\//g, '_')
-			.replace(/\=+$/, '')
+		.replace(/\+/g, '-')
+		.replace(/\//g, '_')
+		.replace(/\=+$/, '')
 	)
-
-	const [{ mediaUrl, directPath }] = await Promise.all([
-		(async() => {
-			const result = await options.upload(
-				encWriteStream,
-				{ fileEncSha256B64, mediaType, timeoutMs: options.mediaUploadTimeoutMs }
-			)
-			logger?.debug('uploaded media')
-			return result
-		})(),
-		(async() => {
-			try {
-				if(requiresThumbnailComputation) {
-					uploadData.jpegThumbnail = await generateThumbnail(bodyPath, mediaType as any, options)
-					logger?.debug('generated thumbnail')
-				}
-
-				if(requiresDurationComputation) {
-					uploadData.seconds = await getAudioDuration(bodyPath)
-					logger?.debug('computed audio duration')
-				}
-			} catch(error) {
-				logger?.warn({ trace: error.stack }, 'failed to obtain extra info')
-			}
-		})(),
-	])
-		.finally(
-			async() => {
-				encWriteStream.destroy()
-				// remove tmp files
-				if(didSaveToTmpPath && bodyPath) {
-					await fs.unlink(bodyPath)
-					logger?.debug('removed tmp files')
-				}
-			}
-		)
-
+	try {
+		if(requiresThumbnailComputation) {
+			uploadData.jpegThumbnail = await generateThumbnail(bodyPath, mediaType as any, options)
+		}
+		if (requiresDurationComputation) {
+			uploadData.seconds = await getAudioDuration(bodyPath)
+		}
+	} catch (error) {
+		options.logger?.info({ trace: error.stack }, 'failed to obtain extra info')
+	}
+	const {mediaUrl} = await options.upload(
+		createReadStream(encBodyPath),
+		{ fileEncSha256B64, mediaType, timeoutMs: options.mediaUploadTimeoutMs }
+	)
+	// remove tmp files
+	await Promise.all(
+		[
+			fs.unlink(encBodyPath),
+			didSaveToTmpPath && bodyPath && fs.unlink(bodyPath)
+		]
+		.filter(Boolean)
+	)
 	delete uploadData.media
 
 	const obj = WAProto.Message.fromObject({
 		[`${mediaType}Message`]: MessageTypeProto[mediaType].fromObject(
 			{
 				url: mediaUrl,
-				directPath,
 				mediaKey,
 				fileEncSha256,
 				fileSha256,
 				fileLength,
-				mediaKeyTimestamp: unixTimestampSeconds(),
+				
 				...uploadData
 			}
 		)
 	})
 
 	if(cacheableKey) {
-		logger.debug({ cacheableKey }, 'set cache')
 		options.mediaCache!.set(cacheableKey, WAProto.Message.encode(obj).finish())
 	}
 
