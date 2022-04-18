@@ -10,6 +10,7 @@ import { join } from 'path'
 import type { Logger } from 'pino'
 import { Readable, Transform } from 'stream'
 import { URL } from 'url'
+import got, { Options, Response } from 'got'
 import { DEFAULT_ORIGIN, MEDIA_PATH_MAP } from '../Defaults'
 import { CommonSocketConfig, DownloadableMessage, MediaConnInfo, MediaType, MessageType, WAGenericMediaMessage, WAMediaUpload, WAMediaUploadFunction, WAMessageContent, WAProto } from '../Types'
 import { hkdf } from './crypto'
@@ -199,7 +200,7 @@ export const getStream = async(item: WAMediaUpload) => {
 	}
 
 	if(item.url.toString().startsWith('http://') || item.url.toString().startsWith('https://')) {
-		return { stream: await getHttpStream(item.url), type: 'remote' }
+		return { stream: await getGotStream(item.url), type: 'remote' }
 	}
 
 	return { stream: createReadStream(item.url), type: 'file' }
@@ -233,11 +234,24 @@ export async function generateThumbnail(
 	return thumbnail
 }
 
-export const getHttpStream = async(url: string | URL, options: AxiosRequestConfig & { isStream?: true } = {}) => {
-	const { default: axios } = await import('axios')
-	const fetched = await axios.get(url.toString(), { ...options, responseType: 'stream' })
-	return fetched.data as Readable
-}
+export const getGotStream = async(url: string | URL, options: Options & { isStream?: true } = {}) => {
+    const fetched = got.stream(url, { ...options, isStream: true })
+    await new Promise((resolve, reject) => {
+        fetched.once('error', reject)
+        fetched.once('response', ({ statusCode }: Response) => {
+            if (statusCode >= 400) {
+                reject(
+					new Boom(
+                    'Invalid code (' + statusCode + ') returned', 
+                    { statusCode }
+                ))
+            } else {
+                resolve(undefined)
+            }
+        })
+    })
+    return fetched
+} 
 
 export const encryptedStream = async(
 	media: WAMediaUpload,
@@ -331,6 +345,7 @@ export const encryptedStream = async(
 	}
 }
 
+
 const DEF_HOST = 'mmg.whatsapp.net'
 const AES_CHUNK_SIZE = 16
 
@@ -344,106 +359,97 @@ export type MediaDownloadOptions = {
 }
 
 export const downloadContentFromMessage = async(
-	{ mediaKey, directPath, url }: DownloadableMessage,
-	type: MediaType,
-	{ startByte, endByte }: MediaDownloadOptions = { }
+    { mediaKey, directPath, url }: DownloadableMessage,
+    type: MediaType,
+    { startByte, endByte }: MediaDownloadOptions = { }
 ) => {
-	const downloadUrl = url || `https://${DEF_HOST}${directPath}`
-	let bytesFetched = 0
-	let startChunk = 0
-	let firstBlockIsIV = false
-	// if a start byte is specified -- then we need to fetch the previous chunk as that will form the IV
-	if(startByte) {
-		const chunk = toSmallestChunkSize(startByte || 0)
-		if(chunk) {
-			startChunk = chunk - AES_CHUNK_SIZE
-			bytesFetched = chunk
+    const downloadUrl = url || `https://${DEF_HOST}${directPath}`
+    let bytesFetched = 0
+    let startChunk = 0
+    let firstBlockIsIV = false
+    // if a start byte is specified -- then we need to fetch the previous chunk as that will form the IV
+    if(startByte) {
+        const chunk = toSmallestChunkSize(startByte || 0)
+        if(chunk) {
+            startChunk = chunk-AES_CHUNK_SIZE
+            bytesFetched = chunk
 
-			firstBlockIsIV = true
-		}
-	}
+            firstBlockIsIV = true
+        }
+    }
+    const endChunk = endByte ? toSmallestChunkSize(endByte || 0)+AES_CHUNK_SIZE : undefined
+    let rangeHeader: string | undefined = undefined
+    if(startChunk || endChunk) {
+        rangeHeader = `bytes=${startChunk}-`
+        if(endChunk) rangeHeader += endChunk
+    }
+    // download the message
+    const fetched = await getGotStream(downloadUrl, {
+        headers: { 
+            Origin: DEFAULT_ORIGIN,
+            Range: rangeHeader
+        }
+    })
 
-	const endChunk = endByte ? toSmallestChunkSize(endByte || 0) + AES_CHUNK_SIZE : undefined
+    let remainingBytes = Buffer.from([])
+    const { cipherKey, iv } = getMediaKeys(mediaKey, type)
 
-	const headers: { [_: string]: string } = {
-		Origin: DEFAULT_ORIGIN,
-	}
-	if(startChunk || endChunk) {
-		headers.Range = `bytes=${startChunk}-`
-		if(endChunk) {
-			headers.Range += endChunk
-		}
-	}
+    let aes: Crypto.Decipher
 
-	// download the message
-	const fetched = await getHttpStream(
-		downloadUrl,
-		{
-			headers,
-			maxBodyLength: Infinity,
-			maxContentLength: Infinity,
-		}
-	)
+    const pushBytes = (bytes: Buffer, push: (bytes: Buffer) => void) => {
+        if(startByte || endByte) {
+            const start = bytesFetched >= startByte ? undefined : Math.max(startByte-bytesFetched, 0)
+            const end = bytesFetched+bytes.length < endByte ? undefined : Math.max(endByte-bytesFetched, 0)
+            
+            push(bytes.slice(start, end))
+    
+            bytesFetched += bytes.length
+        } else {
+            push(bytes)
+        }
+    }
 
-	let remainingBytes = Buffer.from([])
-	const { cipherKey, iv } = getMediaKeys(mediaKey, type)
+    const output = new Transform({
+        transform(chunk, _, callback) {
+            let data = Buffer.concat([remainingBytes, chunk])
+            
+            const decryptLength = toSmallestChunkSize(data.length)
+            remainingBytes = data.slice(decryptLength)
+            data = data.slice(0, decryptLength)
 
-	let aes: Crypto.Decipher
+            if(!aes) {
+                let ivValue = iv
+                if(firstBlockIsIV) {
+                    ivValue = data.slice(0, AES_CHUNK_SIZE)
+                    data = data.slice(AES_CHUNK_SIZE)
+                }
 
-	const pushBytes = (bytes: Buffer, push: (bytes: Buffer) => void) => {
-		if(startByte || endByte) {
-			const start = bytesFetched >= startByte ? undefined : Math.max(startByte - bytesFetched, 0)
-			const end = bytesFetched + bytes.length < endByte ? undefined : Math.max(endByte - bytesFetched, 0)
+                aes = Crypto.createDecipheriv("aes-256-cbc", cipherKey, ivValue)
+                // if an end byte that is not EOF is specified
+                // stop auto padding (PKCS7) -- otherwise throws an error for decryption
+                if(endByte) {
+                    aes.setAutoPadding(false)
+                }
+                
+            }
 
-			push(bytes.slice(start, end))
-
-			bytesFetched += bytes.length
-		} else {
-			push(bytes)
-		}
-	}
-
-	const output = new Transform({
-		transform(chunk, _, callback) {
-			let data = Buffer.concat([remainingBytes, chunk])
-
-			const decryptLength = toSmallestChunkSize(data.length)
-			remainingBytes = data.slice(decryptLength)
-			data = data.slice(0, decryptLength)
-
-			if(!aes) {
-				let ivValue = iv
-				if(firstBlockIsIV) {
-					ivValue = data.slice(0, AES_CHUNK_SIZE)
-					data = data.slice(AES_CHUNK_SIZE)
-				}
-
-				aes = Crypto.createDecipheriv('aes-256-cbc', cipherKey, ivValue)
-				// if an end byte that is not EOF is specified
-				// stop auto padding (PKCS7) -- otherwise throws an error for decryption
-				if(endByte) {
-					aes.setAutoPadding(false)
-				}
-
-			}
-
-			try {
-				pushBytes(aes.update(data), b => this.push(b))
-				callback()
-			} catch(error) {
-				callback(error)
-			}
-		},
-		final(callback) {
-			try {
-				pushBytes(aes.final(), b => this.push(b))
-				callback()
-			} catch(error) {
-				callback(error)
-			}
-		},
-	})
-	return fetched.pipe(output, { end: true })
+            try {
+                pushBytes(aes.update(data), b => this.push(b))
+                callback()
+            } catch(error) {
+                callback(error)
+            }  
+        },
+        final(callback) {
+            try {
+                pushBytes(aes.final(), b => this.push(b))
+                callback()
+            } catch(error) {
+                callback(error)
+            }
+        },
+    })
+    return fetched.pipe(output, { end: true })
 }
 
 export function extensionForMediaMessage(message: WAMessageContent) {
