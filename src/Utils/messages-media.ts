@@ -253,48 +253,60 @@ export const getGotStream = async(url: string | URL, options: Options & { isStre
     return fetched
 } 
 
-export const encryptedStream = async(media: WAMediaUpload, mediaType: MediaType, saveOriginalFileIfRequired = true) => {
-    const { stream, type } = await getStream(media)
+export const encryptedStream = async(
+	media: WAMediaUpload,
+	mediaType: MediaType,
+	saveOriginalFileIfRequired = true,
+	logger?: Logger
+) => {
+	const { stream, type } = await getStream(media)
 
-    const mediaKey = Crypto.randomBytes(32)
-    const {cipherKey, iv, macKey} = getMediaKeys(mediaKey, mediaType)
-    // random name
-    const encBodyPath = join(tmpdir(), mediaType + generateMessageID() + '.enc')
-    // const encWriteStream = createWriteStream(encBodyPath)
-    const encWriteStream = new Readable({ read: () => {} })
-    let bodyPath: string
-    let writeStream: WriteStream
-    let didSaveToTmpPath = false
-    if(type === 'file') {
-        bodyPath = (media as any).url
-    } else if(saveOriginalFileIfRequired) {
-        bodyPath = join(tmpdir(), mediaType + generateMessageID())
-        writeStream = createWriteStream(bodyPath)
-        didSaveToTmpPath = true
-    }
-    
-    let fileLength = 0
-    const aes = Crypto.createCipheriv('aes-256-cbc', cipherKey, iv)
-    let hmac = Crypto.createHmac('sha256', macKey).update(iv)
-    let sha256Plain = Crypto.createHash('sha256')
-    let sha256Enc = Crypto.createHash('sha256')
+	logger?.debug('fetched media stream')
 
-    const onChunk = (buff: Buffer) => {
+	const mediaKey = Crypto.randomBytes(32)
+	const { cipherKey, iv, macKey } = getMediaKeys(mediaKey, mediaType)
+	// random name
+	//const encBodyPath = join(getTmpFilesDirectory(), mediaType + generateMessageID() + '.enc')
+	// const encWriteStream = createWriteStream(encBodyPath)
+	const encWriteStream = new Readable({ read: () => {} })
+
+	let bodyPath: string
+	let writeStream: WriteStream
+	let didSaveToTmpPath = false
+	if(type === 'file') {
+		bodyPath = (media as any).url
+	} else if(saveOriginalFileIfRequired) {
+		bodyPath = join(getTmpFilesDirectory(), mediaType + generateMessageID())
+		writeStream = createWriteStream(bodyPath)
+		didSaveToTmpPath = true
+	}
+
+	let fileLength = 0
+	const aes = Crypto.createCipheriv('aes-256-cbc', cipherKey, iv)
+	let hmac = Crypto.createHmac('sha256', macKey).update(iv)
+	let sha256Plain = Crypto.createHash('sha256')
+	let sha256Enc = Crypto.createHash('sha256')
+
+	const onChunk = (buff: Buffer) => {
 		sha256Enc = sha256Enc.update(buff)
 		hmac = hmac.update(buff)
 		encWriteStream.push(buff)
 	}
-	
-    try {
-    for await(const data of stream) {
-        fileLength += data.length
-        sha256Plain = sha256Plain.update(data)
-        if(writeStream) {
-            if(!writeStream.write(data)) await once(writeStream, 'drain')
-        }
-        onChunk(aes.update(data))
-    }
-    onChunk(aes.final())
+
+	try {
+		for await (const data of stream) {
+			fileLength += data.length
+			sha256Plain = sha256Plain.update(data)
+			if(writeStream) {
+				if(!writeStream.write(data)) {
+					await once(writeStream, 'drain')
+				}
+			}
+
+			onChunk(aes.update(data))
+		}
+
+		onChunk(aes.final())
 
 		const mac = hmac.digest().slice(0, 10)
 		sha256Enc = sha256Enc.update(mac)
@@ -308,19 +320,19 @@ export const encryptedStream = async(media: WAMediaUpload, mediaType: MediaType,
 		writeStream && writeStream.end()
 		stream.destroy()
 
-		// logger?.debug('encrypted data successfully')
-		
-    return {
-        mediaKey,
-        encBodyPath,
-        bodyPath,
-        mac,
-        fileEncSha256,
-        fileSha256,
-        fileLength,
-        didSaveToTmpPath
-    }
-    } catch(error) {
+		logger?.debug('encrypted data successfully')
+
+		return {
+			mediaKey,
+			encWriteStream,
+			bodyPath,
+			mac,
+			fileEncSha256,
+			fileSha256,
+			fileLength,
+			didSaveToTmpPath
+		}
+	} catch(error) {
 		encWriteStream.destroy(error)
 		writeStream.destroy(error)
 		aes.destroy(error)
