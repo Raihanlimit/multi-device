@@ -260,7 +260,8 @@ export const encryptedStream = async(media: WAMediaUpload, mediaType: MediaType,
     const {cipherKey, iv, macKey} = getMediaKeys(mediaKey, mediaType)
     // random name
     const encBodyPath = join(tmpdir(), mediaType + generateMessageID() + '.enc')
-    const encWriteStream = createWriteStream(encBodyPath)
+    // const encWriteStream = createWriteStream(encBodyPath)
+    const encWriteStream = new Readable({ read: () => {} })
     let bodyPath: string
     let writeStream: WriteStream
     let didSaveToTmpPath = false
@@ -283,6 +284,7 @@ export const encryptedStream = async(media: WAMediaUpload, mediaType: MediaType,
         hmac = hmac.update(buff)
         encWriteStream.write(buff)
     }
+    try {
     for await(const data of stream) {
         fileLength += data.length
         sha256Plain = sha256Plain.update(data)
@@ -293,17 +295,20 @@ export const encryptedStream = async(media: WAMediaUpload, mediaType: MediaType,
     }
     onChunk(aes.final())
 
-    const mac = hmac.digest().slice(0, 10)
-    sha256Enc = sha256Enc.update(mac)
-    
-    const fileSha256 = sha256Plain.digest()
-    const fileEncSha256 = sha256Enc.digest()
-    
-    encWriteStream.write(mac)
-    encWriteStream.end()
+		const mac = hmac.digest().slice(0, 10)
+		sha256Enc = sha256Enc.update(mac)
 
-    writeStream && writeStream.end()
+		const fileSha256 = sha256Plain.digest()
+		const fileEncSha256 = sha256Enc.digest()
 
+		encWriteStream.push(mac)
+		encWriteStream.push(null)
+
+		writeStream && writeStream.end()
+		stream.destroy()
+
+		logger?.debug('encrypted data successfully')
+		
     return {
         mediaKey,
         encBodyPath,
@@ -314,6 +319,17 @@ export const encryptedStream = async(media: WAMediaUpload, mediaType: MediaType,
         fileLength,
         didSaveToTmpPath
     }
+    } catch(error) {
+		encWriteStream.destroy(error)
+		writeStream.destroy(error)
+		aes.destroy(error)
+		hmac.destroy(error)
+		sha256Plain.destroy(error)
+		sha256Enc.destroy(error)
+		stream.destroy(error)
+
+		throw error
+	}
 }
 
 
