@@ -58,6 +58,7 @@ exports.getWAUploadToServer = exports.extensionForMediaMessage = exports.downloa
 var boom_1 = require("@hapi/boom");
 var child_process_1 = require("child_process");
 var Crypto = require("crypto");
+var events_1 = require("events");
 var fs_1 = require("fs");
 var os_1 = require("os");
 var path_1 = require("path");
@@ -412,21 +413,117 @@ var getGotStream = function (url, options) {
     });
 };
 exports.getGotStream = getGotStream;
-var encryptedStream = function (media, encWriteStream, push) { return __awaiter(void 0, void 0, void 0, function () { return __generator(this, function (_a) {
-    return [2 /*return*/, ];
-}); }); };
+var encryptedStream = function (media, mediaType, saveOriginalFileIfRequired, logger) {
+    if (saveOriginalFileIfRequired === void 0) { saveOriginalFileIfRequired = true; }
+    return __awaiter(void 0, void 0, void 0, function () {
+        var _a, stream, type, mediaKey, _b, cipherKey, iv, macKey, encWriteStream, bodyPath, writeStream, didSaveToTmpPath, fileLength, aes, hmac, sha256Plain, sha256Enc, onChunk, stream_3, stream_3_1, data, e_2_1, mac, fileSha256, fileEncSha256, error_1;
+        var e_2, _c;
+        return __generator(this, function (_d) {
+            switch (_d.label) {
+                case 0: return [4 /*yield*/, (0, exports.getStream)(media)];
+                case 1:
+                    _a = _d.sent(), stream = _a.stream, type = _a.type;
+                    logger === null || logger === void 0 ? void 0 : logger.debug('fetched media stream');
+                    mediaKey = Crypto.randomBytes(32);
+                    _b = getMediaKeys(mediaKey, mediaType), cipherKey = _b.cipherKey, iv = _b.iv, macKey = _b.macKey;
+                    encWriteStream = new stream_1.Readable({ read: function () { } });
+                    didSaveToTmpPath = false;
+                    if (type === 'file') {
+                        bodyPath = media.url;
+                    }
+                    else if (saveOriginalFileIfRequired) {
+                        bodyPath = (0, path_1.join)(getTmpFilesDirectory(), mediaType + (0, generics_1.generateMessageID)());
+                        writeStream = (0, fs_1.createWriteStream)(bodyPath);
+                        didSaveToTmpPath = true;
+                    }
+                    fileLength = 0;
+                    aes = Crypto.createCipheriv('aes-256-cbc', cipherKey, iv);
+                    hmac = Crypto.createHmac('sha256', macKey).update(iv);
+                    sha256Plain = Crypto.createHash('sha256');
+                    sha256Enc = Crypto.createHash('sha256');
+                    onChunk = function (buff) {
+                        sha256Enc = sha256Enc.update(buff);
+                        hmac = hmac.update(buff);
+                        encWriteStream.push(buff);
+                    };
+                    _d.label = 2;
+                case 2:
+                    _d.trys.push([2, 17, , 18]);
+                    _d.label = 3;
+                case 3:
+                    _d.trys.push([3, 10, 11, 16]);
+                    stream_3 = __asyncValues(stream);
+                    _d.label = 4;
+                case 4: return [4 /*yield*/, stream_3.next()];
+                case 5:
+                    if (!(stream_3_1 = _d.sent(), !stream_3_1.done)) return [3 /*break*/, 9];
+                    data = stream_3_1.value;
+                    fileLength += data.length;
+                    sha256Plain = sha256Plain.update(data);
+                    if (!writeStream) return [3 /*break*/, 7];
+                    if (!!writeStream.write(data)) return [3 /*break*/, 7];
+                    return [4 /*yield*/, (0, events_1.once)(writeStream, 'drain')];
+                case 6:
+                    _d.sent();
+                    _d.label = 7;
+                case 7:
+                    onChunk(aes.update(data));
+                    _d.label = 8;
+                case 8: return [3 /*break*/, 4];
+                case 9: return [3 /*break*/, 16];
+                case 10:
+                    e_2_1 = _d.sent();
+                    e_2 = { error: e_2_1 };
+                    return [3 /*break*/, 16];
+                case 11:
+                    _d.trys.push([11, , 14, 15]);
+                    if (!(stream_3_1 && !stream_3_1.done && (_c = stream_3["return"]))) return [3 /*break*/, 13];
+                    return [4 /*yield*/, _c.call(stream_3)];
+                case 12:
+                    _d.sent();
+                    _d.label = 13;
+                case 13: return [3 /*break*/, 15];
+                case 14:
+                    if (e_2) throw e_2.error;
+                    return [7 /*endfinally*/];
+                case 15: return [7 /*endfinally*/];
+                case 16:
+                    onChunk(aes.final());
+                    mac = hmac.digest().slice(0, 10);
+                    sha256Enc = sha256Enc.update(mac);
+                    fileSha256 = sha256Plain.digest();
+                    fileEncSha256 = sha256Enc.digest();
+                    encWriteStream.push(mac);
+                    encWriteStream.push(null);
+                    writeStream && writeStream.end();
+                    stream.destroy();
+                    logger === null || logger === void 0 ? void 0 : logger.debug('encrypted data successfully');
+                    return [2 /*return*/, {
+                            mediaKey: mediaKey,
+                            encWriteStream: encWriteStream,
+                            bodyPath: bodyPath,
+                            mac: mac,
+                            fileEncSha256: fileEncSha256,
+                            fileSha256: fileSha256,
+                            fileLength: fileLength,
+                            didSaveToTmpPath: didSaveToTmpPath
+                        }];
+                case 17:
+                    error_1 = _d.sent();
+                    encWriteStream.destroy(error_1);
+                    writeStream.destroy(error_1);
+                    aes.destroy(error_1);
+                    hmac.destroy(error_1);
+                    sha256Plain.destroy(error_1);
+                    sha256Enc.destroy(error_1);
+                    stream.destroy(error_1);
+                    throw error_1;
+                case 18: return [2 /*return*/];
+            }
+        });
+    });
+};
 exports.encryptedStream = encryptedStream;
-(null);
-writeStream && writeStream.end();
-stream.destroy();
-logger === null || logger === void 0 ? void 0 : logger.debug('encrypted data successfully');
-hmac.destroy(error);
-sha256Plain.destroy(error);
-sha256Enc.destroy(error);
-stream.destroy(error);
-throw error;
-if (endChunk)
-    rangeHeader += endChunk;
 var DEF_HOST = 'mmg.whatsapp.net';
 var AES_CHUNK_SIZE = 16;
 var toSmallestChunkSize = function (num) {
@@ -549,7 +646,7 @@ var getWAUploadToServer = function (_a, refreshMediaConn) {
     return function (stream, _a) {
         var mediaType = _a.mediaType, fileEncSha256B64 = _a.fileEncSha256B64, timeoutMs = _a.timeoutMs;
         return __awaiter(void 0, void 0, void 0, function () {
-            var got, uploadInfo, url, responseText, result, error_1, isLast;
+            var got, uploadInfo, url, responseText, result, error_2, isLast;
             return __generator(this, function (_b) {
                 switch (_b.label) {
                     case 0: return [4 /*yield*/, Promise.resolve().then(function () { return require('got'); })];
@@ -589,9 +686,9 @@ var getWAUploadToServer = function (_a, refreshMediaConn) {
                         throw new Error("upload failed, reason: ".concat(JSON.stringify(result)));
                     case 7: return [3 /*break*/, 9];
                     case 8:
-                        error_1 = _b.sent();
+                        error_2 = _b.sent();
                         isLast = hostname === hosts[uploadInfo.hosts.length - 1];
-                        logger.debug("Error in uploading to ".concat(hostname, " (").concat(error_1, ") ").concat(isLast ? '' : ', retrying...'));
+                        logger.debug("Error in uploading to ".concat(hostname, " (").concat(error_2, ") ").concat(isLast ? '' : ', retrying...'));
                         return [3 /*break*/, 9];
                     case 9: return [2 /*return*/];
                 }
