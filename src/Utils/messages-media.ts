@@ -280,10 +280,11 @@ export const encryptedStream = async(media: WAMediaUpload, mediaType: MediaType,
     let sha256Enc = Crypto.createHash('sha256')
 
     const onChunk = (buff: Buffer) => {
-        sha256Enc = sha256Enc.update(buff)
-        hmac = hmac.update(buff)
-        encWriteStream.write(buff)
-    }
+		sha256Enc = sha256Enc.update(buff)
+		hmac = hmac.update(buff)
+		encWriteStream.push(buff)
+	}
+	
     try {
     for await(const data of stream) {
         fileLength += data.length
@@ -307,7 +308,7 @@ export const encryptedStream = async(media: WAMediaUpload, mediaType: MediaType,
 		writeStream && writeStream.end()
 		stream.destroy()
 
-		logger?.debug('encrypted data successfully')
+		// logger?.debug('encrypted data successfully')
 		
     return {
         mediaKey,
