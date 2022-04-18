@@ -388,7 +388,7 @@ export const downloadContentFromMessage = async(
 	}
 
 	// download the message
-	const fetched = await getHttpStream(
+	const fetched = await getGotStream(
 		downloadUrl,
 		{
 			headers,
